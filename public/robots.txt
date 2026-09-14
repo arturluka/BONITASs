@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+
+Disallow: /admin
+Disallow: /api/admin
+
+Sitemap: https://bonitas.up.railway.app/sitemap.xml
