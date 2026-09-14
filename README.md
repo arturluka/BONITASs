@@ -1,4 +1,4 @@
-# BONITAS — Loja virtual com WhatsApp e painel administrativo
+ # BONITAS — Loja virtual com WhatsApp e painel administrativo
 
 Sistema completo em Node.js, Express e SQLite. Inclui vitrine responsiva, busca e filtros, favoritos, carrinho, checkout, pedido salvo no banco antes de abrir o WhatsApp, painel administrativo protegido, produtos, fotos, estoque por tamanho/cor, pedidos, cupons e configurações.
 
