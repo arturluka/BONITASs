@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
+import QRCode from 'qrcode';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,7 +21,7 @@ if(!db.prepare('SELECT 1 FROM admins LIMIT 1').get() && initialEmail.includes('@
  console.log('Administrador inicial criado a partir das variáveis de ambiente. Remova ADMIN_PASSWORD_INITIAL após o primeiro acesso.');
 }
 if(production) app.set('trust proxy',1);
-app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],imgSrc:["'self'",'data:','https://images.unsplash.com'],styleSrc:["'self'",'https://fonts.googleapis.com'],fontSrc:["'self'",'https://fonts.gstatic.com'],scriptSrc:["'self'"],connectSrc:["'self'"]}}}));
+app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],imgSrc:["'self'",'data:','https:'],styleSrc:["'self'",'https://fonts.googleapis.com'],fontSrc:["'self'",'https://fonts.gstatic.com'],scriptSrc:["'self'"],connectSrc:["'self'"]}}}));
 app.use(express.json({limit:'300kb'})); app.use(express.urlencoded({extended:false,limit:'50kb'}));
 app.use(session({name:'bonitas.sid',secret:process.env.SESSION_SECRET||'development-only-change-this-long-secret',resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'lax',secure:production,maxAge:1000*60*60*8}}));
 app.use('/api/admin/login',rateLimit({windowMs:15*60*1000,limit:7,standardHeaders:'draft-8',legacyHeaders:false}));
@@ -31,23 +32,55 @@ const safeText=(v,max=200)=>String(v??'').trim().replace(/[<>\u0000-\u001F]/g,''
 const money=v=>Number.isInteger(v)&&v>=0?v:null;
 const productDTO=p=>{const images=db.prepare('SELECT url FROM product_images WHERE product_id=? ORDER BY is_primary DESC,sort_order').all(p.id).map(x=>x.url); const variants=db.prepare('SELECT id,size,color,stock FROM product_variants WHERE product_id=? ORDER BY id').all(p.id); return {...p,colors:JSON.parse(p.colors||'[]'),images,variants,total_stock:variants.reduce((a,v)=>a+v.stock,0)};};
 
+const tlv=(id,value)=>`${id}${String(value.length).padStart(2,'0')}${value}`;
+const pixText=(value,max)=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Za-z0-9 $%*+\-./:]/g,'').toUpperCase().trim().slice(0,max);
+function crc16(value){let crc=0xffff;for(let i=0;i<value.length;i++){crc^=value.charCodeAt(i)<<8;for(let bit=0;bit<8;bit++)crc=(crc&0x8000)?(crc<<1)^0x1021:crc<<1;}return (crc&0xffff).toString(16).toUpperCase().padStart(4,'0');}
+function createPixPayload({key,name,city,amount,txid}){
+ const cleanKey=String(key||'').trim().slice(0,77); if(!cleanKey) return null;
+ const merchant=tlv('00','BR.GOV.BCB.PIX')+tlv('01',cleanKey);
+ const additional=tlv('05',pixText(txid,25)||'***');
+ const base=tlv('00','01')+tlv('26',merchant)+tlv('52','0000')+tlv('53','986')+tlv('54',amount.toFixed(2))+tlv('58','BR')+tlv('59',pixText(name,25)||'BONITAS')+tlv('60',pixText(city,15)||'JOAO PESSOA')+tlv('62',additional)+'6304';
+ return base+crc16(base);
+}
+
 app.get('/api/config',(req,res)=>res.json(settings()));
 app.get('/api/products',(req,res)=>res.json(db.prepare('SELECT * FROM products WHERE active=1 ORDER BY created_at DESC').all().map(productDTO)));
 app.get('/api/products/:slug',(req,res)=>{const p=db.prepare('SELECT * FROM products WHERE slug=? AND active=1').get(safeText(req.params.slug,100)); p?res.json(productDTO(p)):res.status(404).json({error:'Produto não encontrado.'});});
 
-app.post('/api/orders',rateLimit({windowMs:10*60*1000,limit:12}), (req,res)=>{
+app.get('/api/cep/:cep',rateLimit({windowMs:10*60*1000,limit:40}),async(req,res)=>{
+ const cep=String(req.params.cep||'').replace(/\D/g,'');
+ if(!/^\d{8}$/.test(cep)) return res.status(400).json({error:'Digite um CEP com 8 números.'});
+ try{
+  const response=await fetch(`https://viacep.com.br/ws/${cep}/json/`,{signal:AbortSignal.timeout(6000)});
+  if(!response.ok) throw new Error('Serviço de CEP indisponível.');
+  const data=await response.json();
+  if(data.erro) return res.status(404).json({error:'CEP não encontrado.'});
+  res.json({cep:data.cep,street:safeText(data.logradouro,120),complement:safeText(data.complemento,80),district:safeText(data.bairro,80),city:safeText(data.localidade,80),state:safeText(data.uf,2)});
+ }catch(error){res.status(error.name==='TimeoutError'?504:502).json({error:'Não foi possível consultar o CEP agora. Preencha o endereço manualmente.'});}
+});
+
+app.post('/api/orders',rateLimit({windowMs:10*60*1000,limit:12}), async(req,res)=>{
  try{
   const b=req.body||{}, name=safeText(b.customer?.name,100), phone=String(b.customer?.phone||'').replace(/\D/g,''), email=safeText(b.customer?.email,150);
   if(name.length<3||phone.length<10||phone.length>13) return res.status(400).json({error:'Informe nome e WhatsApp válidos.'});
   if(!['pickup','delivery'].includes(b.fulfillment)||!['PIX','Dinheiro','Cartão de débito','Cartão de crédito'].includes(b.paymentMethod)) return res.status(400).json({error:'Escolha recebimento e pagamento.'});
+  const installments=b.paymentMethod==='Cartão de crédito'?Number(b.paymentInstallments||1):1;
+  if(!Number.isInteger(installments)||installments<1||installments>3) return res.status(400).json({error:'Escolha entre 1 e 3 parcelas.'});
   if(!Array.isArray(b.items)||!b.items.length||b.items.length>30) return res.status(400).json({error:'Carrinho inválido.'});
   const cfg=settings(), prepared=[]; let subtotal=0;
   for(const raw of b.items){const id=Number(raw.variantId), qty=Number(raw.quantity); if(!Number.isInteger(id)||!Number.isInteger(qty)||qty<1||qty>20) throw new Error('Quantidade inválida.'); const v=db.prepare('SELECT v.*,p.name,p.price_cents,p.active FROM product_variants v JOIN products p ON p.id=v.product_id WHERE v.id=?').get(id); if(!v||!v.active||v.stock<qty) throw new Error(`${v?.name||'Produto'} sem estoque suficiente.`); subtotal+=v.price_cents*qty; prepared.push({...v,qty});}
   let discount=0,coupon=null; const code=safeText(b.coupon,30).toUpperCase(); if(code){coupon=db.prepare("SELECT * FROM coupons WHERE code=? AND active=1 AND (expires_at IS NULL OR expires_at>datetime('now')) AND (max_uses IS NULL OR uses<max_uses)").get(code); if(!coupon||subtotal<coupon.min_value_cents) throw new Error('Cupom inválido ou não aplicável.'); discount=coupon.type==='percent'?Math.round(subtotal*coupon.value/100):Math.min(coupon.value,subtotal);}
   let address=null, delivery=0; if(b.fulfillment==='delivery'){address={cep:safeText(b.address?.cep,9),street:safeText(b.address?.street,120),number:safeText(b.address?.number,20),complement:safeText(b.address?.complement,80),district:safeText(b.address?.district,80),city:safeText(b.address?.city,80),state:safeText(b.address?.state,2),reference:safeText(b.address?.reference,120)}; if(!address.cep||!address.street||!address.number||!address.district||!address.city||address.state.length!==2) throw new Error('Preencha o endereço completo.'); delivery=Number(cfg.delivery_fee_cents)||0;}
   const total=subtotal-discount+delivery; if(total<(Number(cfg.minimum_order_cents)||0)) throw new Error('Pedido abaixo do valor mínimo.');
-  const create=db.transaction(()=>{const customer=db.prepare('INSERT INTO customers(name,phone,email) VALUES(?,?,?)').run(name,phone,email||null); const order=db.prepare('INSERT INTO orders(customer_id,fulfillment,address_json,payment_method,change_for_cents,subtotal_cents,discount_cents,delivery_cents,total_cents,coupon_code,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(customer.lastInsertRowid,b.fulfillment,address?JSON.stringify(address):null,b.paymentMethod,money(Number(b.changeForCents)),subtotal,discount,delivery,total,coupon?.code||null,safeText(b.notes,300)); const orderNumber=`BON-${String(order.lastInsertRowid).padStart(6,'0')}`; db.prepare('UPDATE orders SET order_number=? WHERE id=?').run(orderNumber,order.lastInsertRowid); db.prepare("INSERT INTO order_status_history(order_id,status) VALUES(?,'Novo')").run(order.lastInsertRowid); for(const x of prepared) db.prepare('INSERT INTO order_items(order_id,product_id,product_name,size,color,quantity,unit_price_cents) VALUES(?,?,?,?,?,?,?)').run(order.lastInsertRowid,x.product_id,x.name,x.size,x.color,x.qty,x.price_cents); if(coupon) db.prepare('UPDATE coupons SET uses=uses+1 WHERE id=?').run(coupon.id); return {id:order.lastInsertRowid,orderNumber};});
-  const made=create(); res.status(201).json({...made,customer:{name,phone},fulfillment:b.fulfillment,address,paymentMethod:b.paymentMethod,items:prepared.map(x=>({name:x.name,size:x.size,color:x.color,quantity:x.qty,unitPriceCents:x.price_cents})),subtotalCents:subtotal,discountCents:discount,deliveryCents:delivery,totalCents:total,storeWhatsapp:cfg.whatsapp});
+  if(b.paymentMethod==='PIX'&&!String(cfg.pix_key||'').trim()) throw new Error('O PIX ainda não foi configurado pela loja. Escolha outra forma de pagamento.');
+  const create=db.transaction(()=>{const customer=db.prepare('INSERT INTO customers(name,phone,email) VALUES(?,?,?)').run(name,phone,email||null); const order=db.prepare('INSERT INTO orders(customer_id,fulfillment,address_json,payment_method,payment_installments,change_for_cents,subtotal_cents,discount_cents,delivery_cents,total_cents,coupon_code,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(customer.lastInsertRowid,b.fulfillment,address?JSON.stringify(address):null,b.paymentMethod,installments,money(Number(b.changeForCents)),subtotal,discount,delivery,total,coupon?.code||null,safeText(b.notes,300)); const orderNumber=`BON-${String(order.lastInsertRowid).padStart(6,'0')}`; db.prepare('UPDATE orders SET order_number=? WHERE id=?').run(orderNumber,order.lastInsertRowid); db.prepare("INSERT INTO order_status_history(order_id,status) VALUES(?,'Novo')").run(order.lastInsertRowid); for(const x of prepared) db.prepare('INSERT INTO order_items(order_id,product_id,product_name,size,color,quantity,unit_price_cents) VALUES(?,?,?,?,?,?,?)').run(order.lastInsertRowid,x.product_id,x.name,x.size,x.color,x.qty,x.price_cents); if(coupon) db.prepare('UPDATE coupons SET uses=uses+1 WHERE id=?').run(coupon.id); return {id:Number(order.lastInsertRowid),orderNumber};});
+  const made=create(); let pixPayload=null,pixQrCode=null;
+  if(b.paymentMethod==='PIX'){
+   pixPayload=createPixPayload({key:cfg.pix_key,name:cfg.pix_recipient_name,city:cfg.pix_city,amount:total/100,txid:made.orderNumber.replace(/\W/g,'')});
+   db.prepare('UPDATE orders SET pix_payload=? WHERE id=?').run(pixPayload,made.id);
+   try{pixQrCode=await QRCode.toDataURL(pixPayload,{width:320,margin:2,errorCorrectionLevel:'M'});}catch(error){console.error('Falha ao renderizar QR Code PIX:',error.message);}
+  }
+  res.status(201).json({...made,customer:{name,phone},fulfillment:b.fulfillment,address,paymentMethod:b.paymentMethod,paymentInstallments:installments,items:prepared.map(x=>({name:x.name,size:x.size,color:x.color,quantity:x.qty,unitPriceCents:x.price_cents})),subtotalCents:subtotal,discountCents:discount,deliveryCents:delivery,totalCents:total,storeWhatsapp:cfg.whatsapp,pixPayload,pixQrCode});
  }catch(e){res.status(400).json({error:e.message||'Não foi possível criar o pedido.'});}
 });
 
@@ -59,7 +92,7 @@ app.post('/api/order-status',rateLimit({windowMs:15*60*1000,limit:12,standardHea
  const items=db.prepare('SELECT product_name,size,color,quantity,unit_price_cents FROM order_items WHERE order_id=? ORDER BY id').all(order.id);
  let history=db.prepare('SELECT status,created_at FROM order_status_history WHERE order_id=? ORDER BY id').all(order.id);
  if(!history.length) history=[{status:order.status,created_at:order.created_at}];
- res.json({orderNumber:order.order_number,createdAt:order.created_at,status:order.status,fulfillment:order.fulfillment,paymentMethod:order.payment_method,subtotalCents:order.subtotal_cents,discountCents:order.discount_cents,deliveryCents:order.delivery_cents,totalCents:order.total_cents,customerName:order.customer_name,items,history});
+ res.json({orderNumber:order.order_number,createdAt:order.created_at,status:order.status,fulfillment:order.fulfillment,paymentMethod:order.payment_method,paymentInstallments:order.payment_installments||1,subtotalCents:order.subtotal_cents,discountCents:order.discount_cents,deliveryCents:order.delivery_cents,totalCents:order.total_cents,customerName:order.customer_name,items,history});
 });
 
 app.post('/api/admin/login',async(req,res)=>{const email=safeText(req.body.email,150).toLowerCase(), admin=db.prepare('SELECT * FROM admins WHERE email=?').get(email); if(!admin||!await bcrypt.compare(String(req.body.password||''),admin.password_hash)) return res.status(401).json({error:'E-mail ou senha incorretos.'}); req.session.regenerate(err=>{if(err)return res.status(500).json({error:'Falha ao iniciar sessão.'}); req.session.adminId=admin.id; req.session.csrf=crypto.randomBytes(24).toString('hex'); res.json({name:admin.name,csrf:req.session.csrf});});});
@@ -87,7 +120,7 @@ app.patch('/api/admin/orders/:id/status',requireAdmin,requireCsrf,(req,res)=>{co
 app.get('/api/admin/coupons',requireAdmin,(req,res)=>res.json(db.prepare('SELECT * FROM coupons ORDER BY id DESC').all()));
 app.post('/api/admin/coupons',requireAdmin,requireCsrf,(req,res)=>{const b=req.body,code=safeText(b.code,30).toUpperCase(),type=b.type,value=Number(b.value),min=Number(b.min_value_cents)||0,max=b.max_uses?Number(b.max_uses):null;if(!/^[A-Z0-9_-]{3,30}$/.test(code)||!['percent','fixed'].includes(type)||!Number.isInteger(value)||value<1)return res.status(400).json({error:'Cupom inválido.'});try{const r=db.prepare('INSERT INTO coupons(code,type,value,expires_at,max_uses,min_value_cents,active) VALUES(?,?,?,?,?,?,?)').run(code,type,value,b.expires_at||null,max,min,b.active===false?0:1);res.status(201).json({id:r.lastInsertRowid});}catch{res.status(400).json({error:'Código já cadastrado.'});}});
 app.delete('/api/admin/coupons/:id',requireAdmin,requireCsrf,(req,res)=>{db.prepare('UPDATE coupons SET active=0 WHERE id=?').run(Number(req.params.id));res.json({ok:true});});
-app.put('/api/admin/settings',requireAdmin,requireCsrf,(req,res)=>{const allowed=['store_name','whatsapp','instagram','address','delivery_fee_cents','low_stock_limit','opening_hours','minimum_order_cents'];const run=db.transaction(()=>{for(const k of allowed)if(k in req.body)db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k,safeText(req.body[k],300));});run();res.json(settings());});
+app.put('/api/admin/settings',requireAdmin,requireCsrf,(req,res)=>{const allowed=['store_name','whatsapp','instagram','address','delivery_fee_cents','low_stock_limit','opening_hours','minimum_order_cents','pix_key','pix_recipient_name','pix_city'];const run=db.transaction(()=>{for(const k of allowed)if(k in req.body)db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k,safeText(req.body[k],300));});run();res.json(settings());});
 
 app.get('/admin',(req,res)=>res.sendFile(path.join(root,'public','admin','index.html')));
 app.get('/admin/*splat',(req,res)=>res.sendFile(path.join(root,'public','admin','index.html')));

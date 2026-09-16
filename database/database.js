@@ -29,8 +29,18 @@ CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status,created_at
 CREATE INDEX IF NOT EXISTS idx_order_history_order ON order_status_history(order_id,created_at);
 `);
 
+// Migrações pequenas e seguras para instalações que já possuem pedidos no Railway.
+// O banco do volume /data é preservado e recebe somente as novas colunas.
+const orderColumns = new Set(db.prepare('PRAGMA table_info(orders)').all().map(column => column.name));
+if (!orderColumns.has('payment_installments')) {
+  db.exec('ALTER TABLE orders ADD COLUMN payment_installments INTEGER NOT NULL DEFAULT 1');
+}
+if (!orderColumns.has('pix_payload')) {
+  db.exec('ALTER TABLE orders ADD COLUMN pix_payload TEXT');
+}
+
 const setting = db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
-[['store_name','BONITAS'],['whatsapp','558399923260'],['instagram','@bonitas_storemodafeminina'],['address','João Pessoa - PB'],['delivery_fee_cents','1000'],['low_stock_limit','3'],['opening_hours','Segunda a sábado, 9h às 18h'],['minimum_order_cents','0']].forEach(x=>setting.run(...x));
+[['store_name','BONITAS'],['whatsapp','558399923260'],['instagram','@bonitas_storemodafeminina'],['address','João Pessoa - PB'],['delivery_fee_cents','1000'],['low_stock_limit','3'],['opening_hours','Segunda a sábado, 9h às 18h'],['minimum_order_cents','0'],['pix_key',''],['pix_recipient_name','BONITAS'],['pix_city','JOAO PESSOA']].forEach(x=>setting.run(...x));
 db.prepare("UPDATE settings SET value='558399923260' WHERE key='whatsapp' AND value='5583999999999'").run();
 db.prepare("UPDATE settings SET value='@bonitas_storemodafeminina' WHERE key='instagram' AND value='@usebonitas'").run();
 

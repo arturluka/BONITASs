@@ -1,6 +1,6 @@
-  # BONITAS — Loja virtual com WhatsApp e painel administrativo
+# BONITAS — Loja virtual com pedidos, PIX e painel administrativo
 
-Sistema completo em Node.js, Express e SQLite. Inclui vitrine responsiva, busca e filtros, favoritos, carrinho, checkout, pedido salvo no banco antes de abrir o WhatsApp, painel administrativo protegido, produtos, fotos, estoque por tamanho/cor, pedidos, cupons e configurações.
+Sistema completo em Node.js, Express e SQLite. Inclui vitrine responsiva, banner automático, busca e filtros, favoritos, carrinho, checkout com CEP, pedido finalizado dentro do site, PIX com QR Code, painel administrativo protegido, produtos, fotos, estoque por tamanho/cor, pedidos, cupons e configurações.
 
 O cliente pode usar **Acompanhar pedido** na loja e consultar com o número `BON-000001` e o mesmo WhatsApp informado na compra. A página mostra o status e o histórico atualizado pelo painel administrativo sem expor endereço, e-mail ou pedidos de outras pessoas.
 
@@ -61,12 +61,15 @@ Entre no painel com o e-mail e a senha criados no passo anterior.
 - **Cadastrar roupa:** Painel → Produtos → Novo produto. Preencha preços, cores, estoque por tamanho e envie até seis imagens JPG, PNG ou WebP de no máximo 5 MB cada.
 - **Limpar produtos antigos:** pare o servidor e execute `npm run clear-products`. Digite `APAGAR` para confirmar. Pedidos antigos preservam o nome e o preço dos itens comprados.
 - **Trocar WhatsApp, Instagram, endereço e entrega:** Painel → Configurações. O WhatsApp deve conter DDI e DDD, somente números; exemplo: `5583999999999`.
+- **Configurar o PIX:** Painel → Configurações → PIX da loja. Informe a chave PIX, o nome e a cidade exatamente como aparecem na conta recebedora. Faça um pedido de valor baixo e teste o QR Code antes de divulgar.
 - **Atualizar estoque:** edite o produto. O estoque é separado por tamanho e cor.
 - **Confirmar pedido:** Painel → Pedidos → Ver pedido → status `Confirmado`. Nesse momento o estoque é baixado em uma transação e nunca pode ficar negativo.
 - **Criar cupom:** Painel → Cupons → Novo cupom. Cupons de porcentagem ou valor fixo são validados no servidor.
 - **Trocar fotos, preços ou descrições:** edite o produto no painel; não é necessário alterar código.
 
 O banco é a fonte oficial para preço, estoque, cupom e número do pedido. O carrinho fica no `localStorage` apenas como conveniência no aparelho do cliente.
+
+O QR Code PIX já inclui o valor e o identificador do pedido, mas é um PIX estático: a confirmação do pagamento não chega automaticamente pelo banco. Confirme o recebimento antes de mudar o pedido para `Confirmado`. A opção de cartão registra de 1 a 3 parcelas, sem coletar número, validade ou CVV; a cobrança acontece na retirada/entrega. Para cobrar cartão diretamente no site é obrigatória uma integração separada com uma operadora de pagamentos e credenciais privadas.
 
 Uma instalação nova começa sem produtos demonstrativos. Cadastre somente as roupas reais pelo painel.
 
@@ -103,6 +106,7 @@ bonitas-store/
 ├── public/
 │   ├── admin/
 │   ├── css/style.css
+│   ├── images/product-placeholder.svg
 │   ├── js/app.js
 │   ├── uploads/
 │   └── index.html

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 1000" role="img" aria-labelledby="title desc">
+  <title id="title">Imagem de produto BONITAS</title>
+  <desc id="desc">Espaço reservado para a fotografia do produto.</desc>
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff2f7"/><stop offset="1" stop-color="#f7c7dc"/></linearGradient></defs>
+  <rect width="800" height="1000" fill="url(#bg)"/>
+  <circle cx="400" cy="390" r="125" fill="#fff" opacity=".72"/>
+  <path d="M330 350c18-48 122-48 140 0l52 49-50 65-18-24v145H346V440l-18 24-50-65z" fill="#e83e8c" opacity=".72"/>
+  <text x="400" y="690" text-anchor="middle" fill="#8d3159" font-family="Georgia,serif" font-size="58" font-weight="700" letter-spacing="8">BONITAS</text>
+  <text x="400" y="742" text-anchor="middle" fill="#9c6a80" font-family="Arial,sans-serif" font-size="23">FOTO EM BREVE</text>
+</svg>
